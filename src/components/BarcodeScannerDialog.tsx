@@ -21,12 +21,23 @@ const BarcodeScannerDialog: React.FC<BarcodeScannerDialogProps> = ({
   const [success, setSuccess] = React.useState(false);
   const [lastDetectionTime, setLastDetectionTime] = React.useState(0);
   const scannerRef = React.useRef<BrowserMultiFormatReader | null>(null);
+  const barcodeDetectorRef = React.useRef<any>(null);
+  const animationRef = React.useRef<number | null>(null);
   const videoRef = React.useRef<HTMLVideoElement>(null);
   const streamRef = React.useRef<MediaStream | null>(null);
   const controlsRef = React.useRef<any>(null);
 
   const stopScanning = async () => {
     console.log("Stopping scanner...");
+
+    if (animationRef.current) {
+      cancelAnimationFrame(animationRef.current);
+      animationRef.current = null;
+    }
+
+    if (barcodeDetectorRef.current) {
+      barcodeDetectorRef.current = null;
+    }
     
     // Stop the scanning controls if they exist
     if (controlsRef.current) {
@@ -56,7 +67,7 @@ const BarcodeScannerDialog: React.FC<BarcodeScannerDialogProps> = ({
   };
 
   const startScanning = async () => {
-    console.log("=== STARTING ZXING BARCODE SCANNER ===");
+    console.log("=== STARTING BARCODE SCANNER ===");
     setError(null);
     setSuccess(false);
     setScanning(true);
@@ -67,61 +78,85 @@ const BarcodeScannerDialog: React.FC<BarcodeScannerDialogProps> = ({
         throw new Error("Video element not found");
       }
 
-      const codeReader = new BrowserMultiFormatReader();
-      scannerRef.current = codeReader;
+      if ("BarcodeDetector" in window) {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+        streamRef.current = stream;
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
 
-      console.log("Video stream started, beginning continuous decode...");
+        const Detector = (window as any).BarcodeDetector;
+        barcodeDetectorRef.current = new Detector({ formats: ["ean_13", "ean_8", "code_128", "code_39", "qr_code"] });
 
-      // Start continuous decoding - this returns controls to stop the process
-      const controls = await codeReader.decodeFromVideoDevice(undefined, videoRef.current, (result, error) => {
-        if (result) {
-          const now = Date.now();
-          // Prevent duplicate detections within 2 seconds
-          if (now - lastDetectionTime > 2000) {
-            console.log("=== BARCODE DETECTED ===");
-            console.log("Detected code:", result.getText());
-            console.log("Format:", result.getBarcodeFormat());
-            
-            setLastDetectionTime(now);
-            setSuccess(true);
-            
-            // Stop scanning and close after success animation
-            setTimeout(() => {
-              stopScanning();
-              onDetected(result.getText());
-              onClose();
-            }, 800);
+        const scan = async () => {
+          if (!barcodeDetectorRef.current || !videoRef.current) return;
+          try {
+            const barcodes = await barcodeDetectorRef.current.detect(videoRef.current);
+            if (barcodes.length) {
+              const code = barcodes[0].rawValue || "";
+              const now = Date.now();
+              if (now - lastDetectionTime > 2000) {
+                setLastDetectionTime(now);
+                setSuccess(true);
+                setTimeout(() => {
+                  stopScanning();
+                  onDetected(code);
+                  onClose();
+                }, 800);
+              }
+            }
+          } catch (err) {
+            console.log("Scan error", err);
           }
-        }
-        
-        if (error && !(error instanceof NotFoundException)) {
-          console.log("Scan error (non-critical):", error.message);
-        }
-      });
+          if (scanning) {
+            animationRef.current = requestAnimationFrame(scan);
+          }
+        };
 
-      // Store the controls to stop scanning later
-      controlsRef.current = controls;
+        animationRef.current = requestAnimationFrame(scan);
+      } else {
+        console.log("BarcodeDetector not supported, falling back to ZXing");
+        const codeReader = new BrowserMultiFormatReader();
+        scannerRef.current = codeReader;
 
-      console.log("=== ZXING SCANNER STARTED SUCCESSFULLY ===");
-      
+        const controls = await codeReader.decodeFromVideoDevice(undefined, videoRef.current, (result, error) => {
+          if (result) {
+            const now = Date.now();
+            if (now - lastDetectionTime > 2000) {
+              setLastDetectionTime(now);
+              setSuccess(true);
+              setTimeout(() => {
+                stopScanning();
+                onDetected(result.getText());
+                onClose();
+              }, 800);
+            }
+          }
+
+          if (error && !(error instanceof NotFoundException)) {
+            console.log("Scan error (non-critical):", error.message);
+          }
+        });
+
+        controlsRef.current = controls;
+      }
     } catch (err: any) {
       console.error("=== SCANNER ERROR ===", err);
       setScanning(false);
-      
+
       let errorMessage = "שגיאה בהפעלת הסורק";
-      
-      if (err.name === 'NotAllowedError') {
+
+      if (err.name === "NotAllowedError") {
         errorMessage = "נדרשת הרשאה לגישה למצלמה. אנא אפשר גישה בדפדפן ונסה שוב.";
-      } else if (err.name === 'NotFoundError') {
+      } else if (err.name === "NotFoundError") {
         errorMessage = "לא נמצאה מצלמה במכשיר. בדוק שהמצלמה פועלת כראוי.";
-      } else if (err.name === 'NotReadableError') {
+      } else if (err.name === "NotReadableError") {
         errorMessage = "המצלמה בשימוש באפליקציה אחרת. סגור אפליקציות אחרות ונסה שוב.";
-      } else if (err.message && err.message.includes('Permission')) {
+      } else if (err.message && err.message.includes("Permission")) {
         errorMessage = "נדרשת הרשאה לגישה למצלמה. בדוק הגדרות הדפדפן.";
-      } else if (err.message && err.message.includes('constraints')) {
+      } else if (err.message && err.message.includes("constraints")) {
         errorMessage = "בעיה בהגדרות המצלמה. נסה לרענן את הדף.";
       }
-      
+
       setError(errorMessage);
     }
   };
